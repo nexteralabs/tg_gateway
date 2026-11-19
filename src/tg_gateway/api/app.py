@@ -5,11 +5,13 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+from .. import app_registry
 from ..core.config import settings
 from ..core.security import setup_secure_logging
 from ..core.db import get_conn
 from ..services.prompts import models as prompt_models
 from ..services.channels import poller as channel_poller
+from .support import router as support_router
 from .v1 import prompts, channels
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,11 @@ async def _lifespan(app: FastAPI):
             logger.error("Failed to clean prompts on boot: %s", exc)
 
     await channel_poller.restore_all_on_startup()
+
+    registration = app_registry.start_registration()
     yield
+    if registration:
+        registration.cancel()
 
 
 def create_app() -> FastAPI:
@@ -68,6 +74,8 @@ def create_app() -> FastAPI:
 
     app.include_router(prompts.router, prefix="/v1", dependencies=[Depends(_check_api_key)])
     app.include_router(channels.router, dependencies=[Depends(_check_api_key)])
+    # Deploy checks for the SRE agent: internal, like /healthz, so no API key
+    app.include_router(support_router)
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz():

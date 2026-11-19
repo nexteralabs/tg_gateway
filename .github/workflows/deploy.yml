@@ -1,84 +1,102 @@
-name: Build, Push & Deploy
+name: Build & Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Redeploy this existing image tag on the dev server (GM), no build (rollback by the SRE agent)"
+        required: false
+        default: ""
 
 jobs:
   build-push:
     name: Build & Push Image
-    runs-on: ubuntu-latest
+    if: inputs.version == ''
     permissions:
       contents: write
       packages: write
-    outputs:
-      image: ${{ steps.bump.outputs.image_path }}:${{ steps.bump.outputs.version }}
-      version: ${{ steps.bump.outputs.version }}
+      id-token: write   # build_push.yml: Nextera Artifact Registry token (WIF)
+    uses: NexteraLabs/common_pipelines/.github/workflows/build_push.yml@main
+    with:
+      image_name: tg-gateway
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Dev server (GM): Windows + Docker Desktop, PowerShell. The app registers itself in the App Registry on
+  # start, so the SRE agent watches it and, if a new version fails its checks, dispatches this workflow
+  # with `version`. Settings come from the GitHub environment QA (copied from the running container).
+  deploy-dev:
+    name: Deploy — dev (GM)
+    needs: build-push
+    # after a build, or alone when a version is given (build skipped)
+    if: >-
+      !cancelled() &&
+      (needs.build-push.result == 'success' || (needs.build-push.result == 'skipped' && inputs.version != ''))
+    runs-on: [self-hosted, GM]
+    environment: QA
+    permissions:
+      contents: read
+      packages: read
+    env:
+      COMPOSE_PROJECT: tg-gateway
+      CONTAINER: tg-gateway
+      VERSION: ${{ inputs.version || needs.build-push.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.TOKEN }}
-          fetch-depth: 0
-
-      - name: Bump patch version
-        id: bump
-        run: |
-          IMAGE_PATH="ghcr.io/${{ github.repository_owner }}/tg-gateway"
-          echo "image_path=${IMAGE_PATH,,}" >> $GITHUB_OUTPUT
-          CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/version = "//;s/"//')
-          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-          MINOR=$(echo "$CURRENT" | cut -d. -f2)
-          PATCH=$(echo "$CURRENT" | cut -d. -f3)
-          VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          sed -i "s/^version = \"${CURRENT}\"/version = \"${VERSION}\"/" pyproject.toml
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Commit and push version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          git diff --cached --quiet || git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
-          git pull --rebase origin main
-          git push
 
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.bump.outputs.image_path }}:latest
-            ${{ steps.bump.outputs.image_path }}:${{ steps.bump.outputs.version }}
-
-      - name: Make GHCR package public
-        run: |
-          curl -s -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/tg-gateway" \
-            -d '{"visibility":"public"}'
-
-  notify:
-    needs: build-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Dispatch to tg_gateway_notify
-        run: |
-          gh api repos/NexteraLabs/tg_gateway_notify/dispatches \
-            --method POST \
-            -f event_type=tg-gateway-deploy \
-            -f "client_payload[image]=${{ needs.build-push.outputs.image }}" \
-            -f "client_payload[sha]=${{ github.sha }}" \
-            -f "client_payload[repo]=${{ github.repository }}" \
-            -f "client_payload[ref]=${{ github.ref_name }}"
+      # docker writes progress on stderr, which this runner's PowerShell treats as fatal:
+      # every docker call checks $LASTEXITCODE itself.
+      - name: Write .env
+        shell: powershell
         env:
-          GH_TOKEN: ${{ secrets.NOTIFY_DISPATCH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TARGET_CHAT_ID: ${{ secrets.TELEGRAM_TARGET_CHAT_ID }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CALLBACK_SIGNING_SECRET: ${{ secrets.CALLBACK_SIGNING_SECRET }}
+          TELEGRAM_MESSAGE_PARSE_MODE: ${{ vars.TELEGRAM_MESSAGE_PARSE_MODE }}
+          TELEGRAM_USE_WEBHOOK: ${{ vars.TELEGRAM_USE_WEBHOOK }}
+          PUBLIC_WEBHOOK_URL: ${{ vars.PUBLIC_WEBHOOK_URL }}
+          CLEAN_ON_BOOT: ${{ vars.CLEAN_ON_BOOT }}
+        run: |
+          $keys = 'TELEGRAM_BOT_TOKEN','TELEGRAM_TARGET_CHAT_ID','TELEGRAM_WEBHOOK_SECRET','DATABASE_URL',
+                  'CALLBACK_SIGNING_SECRET','TELEGRAM_MESSAGE_PARSE_MODE','TELEGRAM_USE_WEBHOOK',
+                  'PUBLIC_WEBHOOK_URL','CLEAN_ON_BOOT'
+          $lines = $keys | ForEach-Object { "$_=" + [Environment]::GetEnvironmentVariable($_) }
+          $lines += "IMAGE_TAG=$env:VERSION"
+          [System.IO.File]::WriteAllText(".env", (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+
+      - name: Deploy
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (-not (docker network ls -q --filter "name=^asf_asf-network$")) { docker network create asf_asf-network }
+          if (-not (docker network ls -q --filter "name=^mysecbrain_default$")) { docker network create mysecbrain_default }
+          docker compose -p $env:COMPOSE_PROJECT pull
+          if ($LASTEXITCODE -ne 0) { throw "docker compose pull failed" }
+          docker compose -p $env:COMPOSE_PROJECT up -d --wait --remove-orphans
+          if ($LASTEXITCODE -ne 0) { throw "docker compose up failed" }
+
+      - name: Smoke check
+        shell: powershell
+        run: |
+          $running = docker inspect -f '{{ .Config.Image }}' $env:CONTAINER
+          Write-Host "Running image: $running"
+          if (-not $running.EndsWith(":$env:VERSION")) { throw "Expected tag $env:VERSION" }
+          $r = Invoke-WebRequest -Uri http://127.0.0.1:8100/healthz -UseBasicParsing -TimeoutSec 10
+          if ($r.StatusCode -ne 200) { throw "healthz answered $($r.StatusCode)" }
+
+      - name: Remove .env
+        if: always()
+        shell: powershell
+        run: Remove-Item -Force -ErrorAction SilentlyContinue .env
