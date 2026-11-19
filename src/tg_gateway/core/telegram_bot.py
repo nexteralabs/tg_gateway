@@ -61,8 +61,11 @@ async def post_prompt_to_chat(
     options: list[str] | None,
     target_chat_id: str | int,
     bot_token: str | None = None,  # NEW parameter - defaults to config token
-):
-    """Post prompt to Telegram chat with optional buttons and media."""
+) -> int:
+    """Post prompt to Telegram chat with optional buttons and media.
+
+    Returns the Telegram message_id of the posted message.
+    """
     from ..services.prompts import models as prompt_models
 
     kb = None
@@ -114,6 +117,8 @@ async def post_prompt_to_chat(
     async for aconn in get_conn():
         await prompt_models.set_message_id(aconn, prompt_id, msg.message_id)
         await prompt_models.set_message_map(aconn, prompt_id, msg.message_id)
+
+    return msg.message_id
 
 
 @retry(
