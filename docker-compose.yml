@@ -5,10 +5,22 @@ services:
     restart: unless-stopped
     ports: ["8100:8100"]
     env_file: .env
+    environment:
+      # ASF App Registry (self-registration on start); the SRE agent watches what is registered there
+      APP_REGISTRY_URL: http://ne-app-registry-srv:8002
+      APP_VERSION: ${IMAGE_TAG:?IMAGE_TAG is required}
+    # Logs to Loki (driver installed by ne-observability-stack's deploy); `docker logs` still works.
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=tg-gateway"
+        mode: non-blocking
     extra_hosts: ["host.docker.internal:host-gateway"]
     networks:
       - default
       - mysecbrain_default
+      - asf-network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')"]
       interval: 30s
@@ -18,4 +30,7 @@ services:
 
 networks:
   mysecbrain_default:
+    external: true
+  asf-network:
+    name: asf_asf-network
     external: true

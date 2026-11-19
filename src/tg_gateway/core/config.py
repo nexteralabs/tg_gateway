@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     ENABLE_DOCS: bool = False  # Expose /docs, /redoc, /openapi.json (disable in prod)
 
+    # ASF App Registry: when set, the app registers itself there and the SRE agent watches it.
+    APP_REGISTRY_URL: str | None = None
+    APP_VERSION: str | None = None  # the image tag; required with APP_REGISTRY_URL
+
     # Channel Gateway settings
     CHANNEL_CALLBACK_MAX_RETRIES: int = 3
     CHANNEL_CALLBACK_RETRY_DELAY: int = 5  # seconds
@@ -57,6 +61,8 @@ class Settings(BaseSettings):
                 "TELEGRAM_WEBHOOK_SECRET is still set to the default value. "
                 "Set a strong unique secret in your .env file."
             )
+        if self.APP_REGISTRY_URL and not self.APP_VERSION:
+            raise ValueError("APP_VERSION must be set when APP_REGISTRY_URL is set")
         if self.USE_AUTH and self.API_KEY is None:
             raise ValueError("API_KEY must be set when USE_AUTH=true")
         return self
