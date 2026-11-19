@@ -18,45 +18,33 @@ jobs:
     if: inputs.version == ''
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     outputs:
-      image: ${{ steps.bump.outputs.image_path }}:${{ steps.bump.outputs.version }}
-      version: ${{ steps.bump.outputs.version }}
+      image: ${{ steps.ver.outputs.image_path }}:${{ steps.ver.outputs.version }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.TOKEN }}
-          fetch-depth: 0
 
-      - name: Bump patch version
-        id: bump
+      # No version-bump commit: main is protected (a pull request and a review are required) and the
+      # token that used to push it (secrets.TOKEN) expired. MAJOR.MINOR come from pyproject.toml, the
+      # patch is the run number of this workflow, which only grows.
+      - name: Version
+        id: ver
         run: |
           IMAGE_PATH="ghcr.io/${{ github.repository_owner }}/tg-gateway"
           echo "image_path=${IMAGE_PATH,,}" >> $GITHUB_OUTPUT
           CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/version = "//;s/"//')
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)
-          PATCH=$(echo "$CURRENT" | cut -d. -f3)
-          VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' pyproject.toml
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Commit and push version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          git diff --cached --quiet || git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
-          git pull --rebase origin main
-          git push
+          echo "version=${MAJOR}.${MINOR}.${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
         uses: docker/build-push-action@v6
@@ -64,12 +52,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ steps.bump.outputs.image_path }}:latest
-            ${{ steps.bump.outputs.image_path }}:${{ steps.bump.outputs.version }}
-
-      - name: Make GHCR package public
-        run: |
-          curl -s -X PATCH -H "Authorization: Bearer ${{ secrets.TOKEN }}" -H "Accept: application/vnd.github+json" "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/tg-gateway" -d '{"visibility":"public"}'
+            ${{ steps.ver.outputs.image_path }}:latest
+            ${{ steps.ver.outputs.image_path }}:${{ steps.ver.outputs.version }}
 
   # Dev server (GM): Windows + Docker Desktop, PowerShell. The app registers itself in the App Registry on
   # start, so the SRE agent watches it and, if a new version fails its checks, dispatches this workflow
