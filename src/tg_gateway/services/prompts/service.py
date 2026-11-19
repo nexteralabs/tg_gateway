@@ -87,6 +87,10 @@ async def create_and_post_prompt(
         )
 
     # Post to Telegram using channel's bot
-    await post_prompt_to_chat(prompt_id, text, media_to_send, options, target_chat, bot_token)
+    message_id = await post_prompt_to_chat(
+        prompt_id, text, media_to_send, options, target_chat, bot_token
+    )
 
-    return prompt_id, row
+    # The row was read at INSERT time, before the Telegram message existed, so its
+    # message_id is still NULL. Return the id Telegram gave us.
+    return prompt_id, {**row, "message_id": message_id}
